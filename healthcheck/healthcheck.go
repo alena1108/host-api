@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/rancherio/go-rancher/client"
 	"github.com/rancherio/host-api/pkg/haproxy"
 	"github.com/rancherio/host-api/util"
@@ -14,7 +15,6 @@ import (
 var PREFIX = "cattle-"
 var SERVER_NAME = "svname"
 var STATUS = "status"
-var LOOPS = (60 * 60) / 2
 
 func Poll() error {
 	client, err := util.GetRancherClient()
@@ -24,10 +24,10 @@ func Poll() error {
 	if client == nil {
 		return fmt.Errorf("Can not create RancherClient, No credentials found")
 	}
-
+	c, _ := lru.New(500)
 	m := &Monitor{
 		client:         client,
-		reportedStatus: map[string]string{},
+		reportedStatus: c,
 	}
 
 	for stat := range m.getStats() {
@@ -39,7 +39,7 @@ func Poll() error {
 
 type Monitor struct {
 	client         *client.RancherClient
-	reportedStatus map[string]string
+	reportedStatus *lru.Cache
 }
 
 func (m *Monitor) getStats() <-chan haproxy.Stat {
@@ -57,7 +57,7 @@ func (m *Monitor) readStats(c chan<- haproxy.Stat) {
 		SocketPath: haproxy.HAPROXY_SOCK,
 	}
 
-	for i := 0; i < LOOPS; i++ {
+	for {
 		// Sleep up front.  This way if this program gets restarted really fast we don't spam cattle
 		time.Sleep(2 * time.Second)
 
@@ -87,7 +87,7 @@ func (m *Monitor) processStat(stat haproxy.Stat) {
 	serverName := strings.TrimPrefix(stat[SERVER_NAME], PREFIX)
 	currentStatus := stat[STATUS]
 
-	previousStatus := m.reportedStatus[serverName]
+	previousStatus, _ := m.reportedStatus.Get(serverName)
 	if strings.HasPrefix(currentStatus, "UP ") {
 		// do nothing on partial UP
 		return
@@ -102,7 +102,7 @@ func (m *Monitor) processStat(stat haproxy.Stat) {
 		if err != nil {
 			logrus.Errorf("Failed to report status %s=%s: %v", serverName, currentStatus, err)
 		} else {
-			m.reportedStatus[serverName] = currentStatus
+			m.reportedStatus.Add(serverName, currentStatus)
 		}
 	}
 }
